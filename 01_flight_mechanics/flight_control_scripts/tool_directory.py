@@ -1,92 +1,7 @@
 import sympy as sp
 import numpy as np
 
-def get_phase_trajectory_7(H_start, H_end, R_start, Vx_start, Vx_end, t_phase, t_offset):
-    """
-    Generates altitude H(t) and range R(t) profiles for a phase (climb, cruise, or descent)
-    using 7th-order (vertical) and 6th-order (horizontal) polynomials.
-
-    Inputs:
-        H_start   : initial altitude [m]
-        H_end     : final altitude [m]
-        R_start   : initial horizontal position [m]
-        Vx_start  : initial horizontal velocity [m/s]
-        Vx_end    : final horizontal velocity [m/s]
-        t_phase   : phase duration [s]
-        t_offset  : phase shift (used in descent profiles)
-
-    Outputs:
-        H_sym  : SymPy expression for altitude [m]
-        R_sym  : SymPy expression for range [m]
-        Vx_sym : SymPy horizontal velocity [m/s]
-        Vy_sym : SymPy vertical velocity [m/s]
-        Ax_sym : SymPy horizontal acceleration [m/s²]
-        Ay_sym : SymPy vertical acceleration [m/s²]
-        t      : SymPy time symbol
-    """
-    t = sp.symbols('t')
-    t1 = t_phase
-
-    # -----------------------------
-    # Vertical Trajectory
-    # -----------------------------
-    H_powers = [t**i for i in range(8)]
-    y_coeffs = sp.symbols('y0:8')
-    H_poly = sum(c*p for c,p in zip(y_coeffs,H_powers))
-
-    Vy_poly = sp.diff(H_poly,t)
-    Ay_poly = sp.diff(Vy_poly,t)
-    Jy_poly = sp.diff(Ay_poly,t)
-
-    H_eqs = [
-        H_poly.subs(t,0) - H_start,
-        H_poly.subs(t,t1) - H_end,
-        Vy_poly.subs(t,0) - 0,
-        Vy_poly.subs(t,t1) - 0,
-        Ay_poly.subs(t,0) - 0,
-        Ay_poly.subs(t,t1) - 0,
-        Jy_poly.subs(t,0) - 0,
-        Jy_poly.subs(t,t1) - 0
-    ]
-
-    H_mat = sp.linear_eq_to_matrix(H_eqs, y_coeffs)
-    y_sol = sp.solve_linear_system(H_mat[0].row_join(sp.Matrix(H_mat[1])), *y_coeffs)
-    H_poly = H_poly.subs(y_sol)
-    H_sym = sp.simplify(H_poly).subs(t, t - t_offset)
-    Vy_sym = sp.diff(H_sym, t)
-    Ay_sym = sp.diff(Vy_sym, t)
-
-    # -----------------------------
-    # Horizontal Trajectory
-    # -----------------------------
-    R_powers = [t**i for i in range(7)]
-    x_coeffs = sp.symbols('x0:7')
-    R_poly = sum(c*p for c,p in zip(x_coeffs,R_powers))
-
-    Vx_poly = sp.diff(R_poly,t)
-    Ax_poly = sp.diff(Vx_poly,t)
-    Jx_poly = sp.diff(Ax_poly,t)
-
-    R_eqs = [
-        R_poly.subs(t,0) - R_start,
-        Vx_poly.subs(t,0) - Vx_start,
-        Vx_poly.subs(t,t1) - Vx_end,
-        Ax_poly.subs(t,0) - 0,
-        Ax_poly.subs(t,t1) - 0,
-        Jx_poly.subs(t,0) - 0,
-        Jx_poly.subs(t,t1) - 0
-    ]
-
-    R_mat = sp.linear_eq_to_matrix(R_eqs, x_coeffs)
-    x_sol = sp.solve_linear_system(R_mat[0].row_join(sp.Matrix(R_mat[1])), *x_coeffs)
-    R_poly = R_poly.subs(x_sol)
-    R_sym = sp.simplify(R_poly).subs(t, t - t_offset)
-    Vx_sym = sp.diff(R_sym, t)
-    Ax_sym = sp.diff(Vx_sym, t)
-
-    return H_sym, R_sym, Vx_sym, Vy_sym, Ax_sym, Ay_sym, t
-
-def get_phase_trajectory_11(H_start, H_end, R_start, Vx_start, Vx_end, t_phase, t_offset):
+def get_phase_trajectory(H_start, H_end, R_start, Vx_start, Vx_end, t_phase, t_offset):
     """
     Generates altitude H(t) and range R(t) profiles using
     an 11th-order vertical polynomial and 6th-order horizontal polynomial.
@@ -165,7 +80,7 @@ def get_phase_trajectory_11(H_start, H_end, R_start, Vx_start, Vx_end, t_phase, 
 
     return H_sym, R_sym, Vx_sym, Vy_sym, Ax_sym, Ay_sym, t
 
-def get_thrust(H_sym, Vx_sym, Vy_sym, Ax_sym, Ay_sym, rho_0, M, g, Cd, Cl, Ab_frontal, Aw_planform, Ab_top):
+def get_thrust(H_sym, Vx_sym, Vy_sym, Ax_sym, Ay_sym, rho_0, M, g, Cd, Cl, Ab_frontal, Aw_planform):
     """
     Generates horizontal and vertical thrust profiles Tx(t) & Ty(t)
     for a given aircraft trajectory using symbolic expressions.
@@ -182,7 +97,6 @@ def get_thrust(H_sym, Vx_sym, Vy_sym, Ax_sym, Ay_sym, rho_0, M, g, Cd, Cl, Ab_fr
         Cl          : lift coefficient (dimensionless)
         Ab_frontal  : aircraft frontal area [m²]
         Aw_planform : wing planform area [m²]
-        Ab_top      : top surface area of aircraft [m²]
 
     Outputs:
         Tx_sym : horizontal thrust [N] (SymPy expression)
@@ -191,8 +105,8 @@ def get_thrust(H_sym, Vx_sym, Vy_sym, Ax_sym, Ay_sym, rho_0, M, g, Cd, Cl, Ab_fr
 
     rho_sym = rho_0 * sp.exp(-H_sym / 8500)
 
-    Tx_sym = (M * Ax_sym) + (0.5 * Cd * rho_sym * Ab_frontal * (Vx_sym**2))
-    Ty_sym = M * (Ay_sym + g) - 0.5* rho_sym * (Cl * Aw_planform * (Vx_sym**2) - Cd * Ab_top * (Vy_sym**2))
+    Tx_sym = (M * Ax_sym) + (0.5 * rho_sym * sp.sqrt(Vx_sym**2 + Vy_sym**2)) * ((Cd * Ab_frontal * Vx_sym) + (Cl * Aw_planform * Vy_sym))
+    Ty_sym = M * (Ay_sym + g) + (0.5* rho_sym * sp.sqrt(Vx_sym**2 + Vy_sym**2)) * ((Cd * Ab_frontal * Vy_sym) - (Cl * Aw_planform * Vx_sym))
 
     return Tx_sym, Ty_sym
 
@@ -225,7 +139,8 @@ def get_power(Tx_sym, Ty_sym, H_sym, Vx_sym, Vy_sym, A_rotor, rotor_count, rho_0
     V = sp.sqrt(Vx_sym**2 + Vy_sym**2)
     vi = sp.sqrt((sp.sqrt(V**4 + 4*vh**4) - V**2)/2)
 
-    p_useful = (Tx_sym * Vx_sym + Ty_sym * Vy_sym)/rotor_count
+    # p_useful = (Tx_sym * Vx_sym + Ty_sym * Vy_sym)/rotor_count
+    p_useful = T_rotor * V
 
     kappa = 1.15
     p_induced = (kappa * T_rotor * vi)
@@ -235,24 +150,25 @@ def get_power(Tx_sym, Ty_sym, H_sym, Vx_sym, Vy_sym, A_rotor, rotor_count, rho_0
 
     return T_sym, P_sym
 
-def get_rotor_tilt(Vx_sym, Vy_sym, Tx_sym, Ty_sym):
+def get_tilt(Vx_sym, Vy_sym, Tx_sym, Ty_sym):
     t = sp.symbols('t')
-    epsilon = 1e-6  # small number to avoid divide-by-zero
-    # Flight path angle: 0 to 90°
-    flight_angle_sym = sp.Piecewise(
-        (sp.pi/2, sp.Abs(Vx_sym) < epsilon),  # Vx ≈ 0 → angle = π/2
-        (sp.atan2(sp.Abs(Vy_sym), Vx_sym), True))
+    flight_path_sym = sp.atan2(Vy_sym, Vx_sym)
     tilt_angle_sym = sp.atan2(Tx_sym, Ty_sym)
     tilt_speed_sym = sp.diff(tilt_angle_sym, t)
     tilt_acc_sym = sp.diff(tilt_speed_sym, t)
 
-    return flight_angle_sym, tilt_angle_sym, tilt_speed_sym, tilt_acc_sym
+    return flight_path_sym, tilt_angle_sym, tilt_speed_sym, tilt_acc_sym
 
 def eval_sym(exprs, t, time):
-    return [np.full_like(time, sp.lambdify(t, e, "numpy")(time), dtype=float)
-            if np.isscalar(sp.lambdify(t, e, "numpy")(time))
-            else np.array(sp.lambdify(t, e, "numpy")(time), dtype=float)
-            for e in exprs]
+    result = []
+    for e in exprs:
+        f = sp.lambdify(t, e, "numpy")
+        val = f(time)   # return vector, not scalar
+        val = np.array(val, dtype=float)
+        if val.shape == ():  # if scalar returned
+            val = np.full_like(time, val, dtype=float)
+        result.append(val)
+    return result
 
 def phases(cl, cr, ds, t, t_climb, t_cruise):
     return sp.Piecewise(
@@ -260,4 +176,67 @@ def phases(cl, cr, ds, t, t_climb, t_cruise):
         (cr, t <= t_climb + t_cruise),
         (ds, True)
     )
+
+def solve_phase(H_start, H_end, R_start, Vx_start, Vx_end,
+                t_phase, t_offset, time_vec,
+                rho_0, M, g, Cd, Cl, Ab_frontal, Aw_planform,
+                A_rotor, rotor_count):
+
+    # -----------------------------
+    # Trajectory
+    # -----------------------------
+    H_sym, R_sym, Vx_sym, Vy_sym, Ax_sym, Ay_sym, t = get_phase_trajectory(
+        H_start, H_end, R_start, Vx_start, Vx_end, t_phase, t_offset
+    )
+
+    H, R, Vx, Vy, Ax, Ay = eval_sym(
+        [H_sym, R_sym, Vx_sym, Vy_sym, Ax_sym, Ay_sym],
+        t, time_vec
+    )
+
+    # -----------------------------
+    # Thrust
+    # -----------------------------
+    Tx_sym, Ty_sym = get_thrust(
+        H_sym, Vx_sym, Vy_sym, Ax_sym, Ay_sym,
+        rho_0, M, g, Cd, Cl, Ab_frontal, Aw_planform
+    )
+
+    Tx, Ty = eval_sym([Tx_sym, Ty_sym], t, time_vec)
+
+    # -----------------------------
+    # Power
+    # -----------------------------
+    T_sym, P_sym = get_power(Tx_sym, Ty_sym, H_sym, Vx_sym, Vy_sym, A_rotor, rotor_count, rho_0)
+
+    T, P = eval_sym([T_sym, P_sym], t, time_vec)
+
+    # -----------------------------
+    # Tilt / Flight Path
+    # -----------------------------
+    flight_sym, tilt_sym, tilt_speed_sym, tilt_acc_sym = get_tilt(
+        Vx_sym, Vy_sym, Tx_sym, Ty_sym
+    )
+
+    flight, tilt, tilt_speed, tilt_acc = eval_sym(
+        [flight_sym, tilt_sym, tilt_speed_sym, tilt_acc_sym],
+        t, time_vec
+    )
+
+    return {
+        "H": H,
+        "R": R,
+        "Vx": Vx,
+        "Vy": Vy,
+        "Ax": Ax,
+        "Ay": Ay,
+        "Tx": Tx,
+        "Ty": Ty,
+        "T": T,
+        "P": P,
+        "flight_angle": flight,
+        "tilt_angle": tilt,
+        "tilt_speed": tilt_speed,
+        "tilt_acc": tilt_acc
+    }
 
