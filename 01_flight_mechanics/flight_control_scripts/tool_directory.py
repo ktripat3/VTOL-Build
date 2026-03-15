@@ -1,14 +1,30 @@
 import sympy as sp
 import numpy as np
+from scipy.integrate import cumulative_trapezoid
+import matplotlib.pyplot as plt
+
+def get_params(mission, aircraft):
+    # Constants
+    rho_0 = 1.225               # Air Density @ Sea Level (kg/m^3)
+    g = 9.81                    # Acceleration due to gravity (m/s^2)
+
+    # Flight Parameters
+    M = mission[0]
+    A = mission[1]
+
+    Aw_planform = aircraft[0]
+    Ab_frontal = aircraft[1]
+    A_rotor = sp.pi * (aircraft[2]/2)**2
+    Cd = aircraft[3]
+    Cl = aircraft[4]
+    rho_A = rho_0 * sp.exp(-A/8500)
+    Vc = sp.sqrt(2*M*g/(Cl*rho_A*Aw_planform))
+    
+    return rho_0, g, M, A, Vc, Aw_planform, Ab_frontal, A_rotor, Cd, Cl
 
 def get_phase_trajectory(H_start, H_end, R_start, Vx_start, Vx_end, t_phase, t_offset):
-    """
-    Generates altitude H(t) and range R(t) profiles using
-    an 11th-order vertical polynomial and 6th-order horizontal polynomial.
-    """
     t = sp.symbols('t')
     t1 = t_phase
-
 
     # -----------------------------
     # Horizontal Trajectory (6th order)
@@ -39,7 +55,6 @@ def get_phase_trajectory(H_start, H_end, R_start, Vx_start, Vx_end, t_phase, t_o
 
     Vx_sym = sp.diff(R_sym, t)
     Ax_sym = sp.diff(Vx_sym, t)
-
 
     # -----------------------------
     # Vertical Trajectory (11th order)
@@ -81,53 +96,23 @@ def get_phase_trajectory(H_start, H_end, R_start, Vx_start, Vx_end, t_phase, t_o
     return H_sym, R_sym, Vx_sym, Vy_sym, Ax_sym, Ay_sym, t
 
 def get_thrust(H_sym, Vx_sym, Vy_sym, Ax_sym, Ay_sym, rho_0, M, g, Cd, Cl, Ab_frontal, Aw_planform):
-    """
-    Generates horizontal and vertical thrust profiles Tx(t) & Ty(t)
-    for a given aircraft trajectory using symbolic expressions.
-
-    Inputs:
-        H_sym       : altitude function H(t) [m] (SymPy expression)
-        Vx_sym      : horizontal velocity Vx(t) [m/s] (SymPy expression)
-        Vy_sym      : vertical velocity Vy(t) [m/s] (SymPy expression)
-        Ax_sym      : horizontal acceleration Ax(t) [m/s²] (SymPy expression)
-        Ay_sym      : vertical acceleration Ay(t) [m/s²] (SymPy expression)
-        rho_0       : air density at sea level [kg/m³]
-        M           : aircraft mass [kg]
-        Cd          : drag coefficient (dimensionless)
-        Cl          : lift coefficient (dimensionless)
-        Ab_frontal  : aircraft frontal area [m²]
-        Aw_planform : wing planform area [m²]
-
-    Outputs:
-        Tx_sym : horizontal thrust [N] (SymPy expression)
-        Ty_sym : vertical thrust [N] (SymPy expression)
-    """
 
     rho_sym = rho_0 * sp.exp(-H_sym / 8500)
 
-    Tx_sym = (M * Ax_sym) + (0.5 * rho_sym * sp.sqrt(Vx_sym**2 + Vy_sym**2)) * ((Cd * Ab_frontal * Vx_sym) + (Cl * Aw_planform * Vy_sym))
-    Ty_sym = M * (Ay_sym + g) + (0.5* rho_sym * sp.sqrt(Vx_sym**2 + Vy_sym**2)) * ((Cd * Ab_frontal * Vy_sym) - (Cl * Aw_planform * Vx_sym))
+    V = sp.sqrt(Vx_sym**2 + Vy_sym**2)
+    gamma = sp.atan2(Vy_sym,Vx_sym)
+
+    Tx_up = (M * Ax_sym) + (0.5 * rho_sym * (V**2)) * ((Cd * Ab_frontal * sp.cos(gamma)) + (Cl * Aw_planform * sp.sin(gamma)))
+    Ty_up = M * (Ay_sym + g) + (0.5 * rho_sym * (V**2)) * ((Cd * Ab_frontal * sp.sin(gamma)) - (Cl * Aw_planform * sp.cos(gamma)))
+    Tx_down = (M * Ax_sym) + (0.5 * rho_sym * (V**2)) * ((Cd * Ab_frontal * sp.cos(gamma)) - (Cl * Aw_planform * sp.sin(gamma)))
+    Ty_down = M * (Ay_sym + g) - (0.5 * rho_sym * (V**2)) * ((Cd * Ab_frontal * sp.sin(gamma)) + (Cl * Aw_planform * sp.cos(gamma)))
+
+    Tx_sym = sp.Piecewise((Tx_up, Vy_sym >= 0),(Tx_down, True))
+    Ty_sym = sp.Piecewise((Ty_up, Vy_sym >= 0),(Ty_down, True))
 
     return Tx_sym, Ty_sym
 
 def get_power(Tx_sym, Ty_sym, H_sym, Vx_sym, Vy_sym, A_rotor, rotor_count, rho_0):
-    """
-    Computes total rotor power required for a given trajectory, 
-    using horizontal and vertical thrust and aircraft kinematics.
-
-    Inputs:
-        Tx_sym      : horizontal thrust [N] (SymPy expression)
-        Ty_sym      : vertical thrust [N] (SymPy expression)
-        H_sym       : altitude H(t) [m] (SymPy expression)
-        Vx_sym      : horizontal velocity Vx(t) [m/s] (SymPy expression)
-        Vy_sym      : vertical velocity Vy(t) [m/s] (SymPy expression)
-        A_rotor     : single rotor disk area [m²]
-        rotor_count : number of rotors
-
-    Outputs:
-        T_sym       : total rotor thrust [N] (SymPy expression)
-        P_sym       : total power [W] (SymPy expression)
-    """
 
     T_sym = sp.sqrt(Tx_sym**2 + Ty_sym**2)
     T_rotor = T_sym/rotor_count
@@ -139,7 +124,7 @@ def get_power(Tx_sym, Ty_sym, H_sym, Vx_sym, Vy_sym, A_rotor, rotor_count, rho_0
     V = sp.sqrt(Vx_sym**2 + Vy_sym**2)
     vi = sp.sqrt((sp.sqrt(V**4 + 4*vh**4) - V**2)/2)
 
-    # p_useful = (Tx_sym * Vx_sym + Ty_sym * Vy_sym)/rotor_count
+    # p_useful = (Tx_sym * Vx_sym + sp.Max(Ty_sym * Vy_sym, 0)) / rotor_count
     p_useful = T_rotor * V
 
     kappa = 1.15
@@ -169,13 +154,6 @@ def eval_sym(exprs, t, time):
             val = np.full_like(time, val, dtype=float)
         result.append(val)
     return result
-
-def phases(cl, cr, ds, t, t_climb, t_cruise):
-    return sp.Piecewise(
-        (cl, t <= t_climb),
-        (cr, t <= t_climb + t_cruise),
-        (ds, True)
-    )
 
 def solve_phase(H_start, H_end, R_start, Vx_start, Vx_end,
                 t_phase, t_offset, time_vec,
@@ -239,4 +217,276 @@ def solve_phase(H_start, H_end, R_start, Vx_start, Vx_end,
         "tilt_speed": tilt_speed,
         "tilt_acc": tilt_acc
     }
+
+def get_controls(mission, aircraft):
+
+    t_cl = mission[3]
+    t_cr = mission[4]
+    t_ds = mission[5]
+    rotor_count = aircraft[4]
+
+    rho_0, g, M, A, Vc, Aw_planform, Ab_frontal, A_rotor, Cd, Cl = get_params(mission, aircraft)
+
+    # Time Domains for Climb, Cruise, Descent
+    t1 = np.linspace(0, t_cl, 2*t_cl)
+    t2 = np.linspace(t_cl, t_cl+t_cr, 2*t_cr)
+    t3 = np.linspace(t_cl+t_cr, t_cl+t_cr+t_ds, 2*t_ds)
+    t_phases = [t1, t2, t3]
+    # -----------------------------
+    # Compute Flight Controls
+    # -----------------------------
+    # Climb Profiles
+    cl = solve_phase(0, A, 0, 0, Vc, t_cl, 0, t1, rho_0, M, g, Cd, Cl, Ab_frontal, Aw_planform, A_rotor, rotor_count)
+
+    # Cruise Profiles
+    cr = solve_phase(A, A, cl["R"][-1], Vc, Vc, t_cr, t_cl, t2, rho_0, M, g, Cd, Cl, Ab_frontal, Aw_planform, A_rotor, rotor_count)
+
+    # Descent Profiles
+    ds = solve_phase(A, 0, cr["R"][-1], Vc, 0, t_ds, t_cl + t_cr, t3, rho_0, M, g, Cd, Cl, Ab_frontal, Aw_planform, A_rotor, rotor_count)
+
+    # -----------------------------
+    # Compile Profiles
+    # -----------------------------
+    flight = {"Climb": cl, "Cruise": cr, "Descent": ds}
+    flight_phases = list(flight.keys())
+    phases = list(flight.values())
+
+    H_phases = [p["H"] for p in phases]
+    R_phases = [p["R"] for p in phases]
+
+    Vx_phases = [p["Vx"] for p in phases]
+    Vy_phases = [p["Vy"] for p in phases]
+
+    Ax_phases = [p["Ax"] for p in phases]
+    Ay_phases = [p["Ay"] for p in phases]
+
+    Tx_phases = [p["Tx"] for p in phases]
+    Ty_phases = [p["Ty"] for p in phases]
+
+    T_phases = [p["T"] for p in phases]
+    P_phases = [p["P"] for p in phases]
+    P = np.concatenate(P_phases)
+    time = np.concatenate(t_phases)
+    if np.isnan(P[0]):
+        P[0] = P[1]
+    E = cumulative_trapezoid(P, time, initial=0)
+
+    flight_angle_phases = [p["flight_angle"] for p in phases]
+    flight_angle_phases[-1][-1] = 0
+
+    tilt_angle_phases = [p["tilt_angle"] for p in phases]
+    tilt_speed_phases = [p["tilt_speed"] for p in phases]
+    tilt_acc_phases = [p["tilt_acc"] for p in phases]
+
+    return flight_phases, t_phases, H_phases, R_phases, Vx_phases, Vy_phases, Ax_phases, Ay_phases, Tx_phases, Ty_phases, T_phases, P_phases, E, flight_angle_phases, tilt_angle_phases, tilt_speed_phases, tilt_acc_phases
+
+def get_performance(controls):
+    _, _, _, R_phases, *_, E, _, _, _, _ = controls
+    # Performance
+    Range = R_phases[-1][-1]
+    Energy = E[-1]
+    unit_range = 3600 * Range / Energy
+    print(f"Range per unit Energy Consumption = {unit_range} km/kWh")
+    return unit_range
+
+def plot_time_trajectory(controls):
+
+    flight_phases, t_phases, H_phases, R_phases, Vx_phases, Vy_phases, Ax_phases, Ay_phases, *_, flight_angle_phases, tilt_angle_phases, tilt_speed_phases, tilt_acc_phases = controls
+    fig, axes = plt.subplots(6, 3, figsize=(15,12))
+
+    # Grayscale palette
+    primary_color   = '#d9885f'  # dull/muted orange
+    secondary_color = '#7fa97f'  # dull/muted green
+    tertiary_color  = '#dcdcdc'  # light gray for grids
+
+    for i in range(3):
+
+        # 1. Ground Range & Altitude
+        ax1 = axes[0,i]
+        ax1.plot(t_phases[i], R_phases[i]/1000, color=primary_color, linestyle='-', label='Ground Range')
+        ax1.set_title(flight_phases[i], fontsize=12, fontweight='bold')
+        ax1.set_ylabel("Range [km]", color=primary_color)
+        ax1.tick_params(axis='y', labelcolor=primary_color)
+        ax1.grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+
+        ax1b = ax1.twinx()
+        ax1b.plot(t_phases[i], H_phases[i], color=secondary_color, linestyle='-', label='Altitude')
+        ax1b.set_ylabel("Altitude [m]", color=secondary_color)
+        ax1b.tick_params(axis='y', labelcolor=secondary_color)
+
+        # 2. Flight Path Angle & Tilt Angle
+        ax2 = axes[1,i]
+        ax2.plot(t_phases[i], (180/np.pi)*flight_angle_phases[i], color=primary_color, linestyle='-', label='Flight Path')
+        ax2.set_ylabel("Flight Path [deg]", color=primary_color)
+        ax2.tick_params(axis='y', labelcolor=primary_color)
+        ax2.grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+
+        ax2b = ax2.twinx()
+        ax2b.plot(t_phases[i], (180/np.pi)*tilt_angle_phases[i], color=secondary_color, linestyle='-', label='Tilt Angle')
+        ax2b.set_ylabel("Tilt [deg]", color=secondary_color)
+        ax2b.tick_params(axis='y', labelcolor=secondary_color)
+
+        # 3. Vx & Vy
+        ax3 = axes[2,i]
+        ax3.plot(t_phases[i], Vx_phases[i], color=primary_color, linestyle='-', label='Vx')
+        ax3.set_ylabel("Vx [m/s]", color=primary_color)
+        ax3.tick_params(axis='y', labelcolor=primary_color)
+        ax3.grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+
+        ax3b = ax3.twinx()
+        ax3b.plot(t_phases[i], Vy_phases[i], color=secondary_color, linestyle='-', label='Vy')
+        ax3b.set_ylabel("Vy [m/s]", color=secondary_color)
+        ax3b.tick_params(axis='y', labelcolor=secondary_color)
+
+        # 4. Tilt Speed
+        axes[3,i].plot(t_phases[i], (180/np.pi)*tilt_speed_phases[i], color='black', linestyle='-')
+        axes[3,i].set_ylabel("Tilt Speed [deg/s]")
+        axes[3,i].grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+
+        # 5. Ax & Ay
+        ax5 = axes[4,i]
+        ax5.plot(t_phases[i], Ax_phases[i], color=primary_color, linestyle='-', label='Ax')
+        ax5.set_ylabel("Ax [m/s²]", color=primary_color)
+        ax5.tick_params(axis='y', labelcolor=primary_color)
+        ax5.grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+
+        ax5b = ax5.twinx()
+        ax5b.plot(t_phases[i], Ay_phases[i], color=secondary_color, linestyle='-', label='Ay')
+        ax5b.set_ylabel("Ay [m/s²]", color=secondary_color)
+        ax5b.tick_params(axis='y', labelcolor=secondary_color)
+
+        # 6. Tilt Acceleration
+        axes[5,i].plot(t_phases[i], (180/np.pi)*tilt_acc_phases[i], color='black', linestyle='-')
+        axes[5,i].set_ylabel("Tilt Acc [deg/s²]")
+        axes[5,i].set_xlabel("Time [s]")
+        axes[5,i].grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+
+    plt.tight_layout()
+    plt.show()
+
+def plot_range_trajectory(controls):
+
+    flight_phases, t_phases, H_phases, R_phases, Vx_phases, Vy_phases, Ax_phases, Ay_phases, *_, flight_angle_phases, tilt_angle_phases, tilt_speed_phases, tilt_acc_phases = controls
+    fig, axes = plt.subplots(6, 3, figsize=(15,12))
+
+    # Grayscale palette
+    primary_color   = '#d9885f'  # dull/muted orange
+    secondary_color = '#7fa97f'  # dull/muted green
+    tertiary_color  = '#dcdcdc'  # light gray for grids
+
+    for i in range(3):
+
+        # 1. Ground Range & Altitude
+        ax1 = axes[0,i]
+        ax1.plot(R_phases[i]/1000, H_phases[i], color='black', linestyle='-')
+        ax1.set_title(flight_phases[i], fontsize=12, fontweight='bold')
+        ax1.set_ylabel("Altitude [m]", color=primary_color)
+        ax1.tick_params(axis='y', labelcolor=primary_color)
+        ax1.grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+
+        # 2. Flight Path Angle & Tilt Angle
+        ax2 = axes[1,i]
+        ax2.plot(R_phases[i]/1000, (180/np.pi)*flight_angle_phases[i], color=primary_color, linestyle='-', label='Flight Path')
+        ax2.set_ylabel("Flight Path [deg]", color=primary_color)
+        ax2.tick_params(axis='y', labelcolor=primary_color)
+        ax2.grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+
+        ax2b = ax2.twinx()
+        ax2b.plot(R_phases[i]/1000, (180/np.pi)*tilt_angle_phases[i], color=secondary_color, linestyle='-', label='Tilt Angle')
+        ax2b.set_ylabel("Tilt [deg]", color=secondary_color)
+        ax2b.tick_params(axis='y', labelcolor=secondary_color)
+
+        # 3. Vx & Vy
+        ax3 = axes[2,i]
+        ax3.plot(R_phases[i]/1000, Vx_phases[i], color=primary_color, linestyle='-', label='Vx')
+        ax3.set_ylabel("Vx [m/s]", color=primary_color)
+        ax3.tick_params(axis='y', labelcolor=primary_color)
+        ax3.grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+
+        ax3b = ax3.twinx()
+        ax3b.plot(R_phases[i]/1000, Vy_phases[i], color=secondary_color, linestyle='-', label='Vy')
+        ax3b.set_ylabel("Vy [m/s]", color=secondary_color)
+        ax3b.tick_params(axis='y', labelcolor=secondary_color)
+
+        # 4. Tilt Speed
+        axes[3,i].plot(R_phases[i]/1000, (180/np.pi)*tilt_speed_phases[i], color='black', linestyle='-')
+        axes[3,i].set_ylabel("Tilt Speed [deg/s]")
+        axes[3,i].grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+
+        # 5. Ax & Ay
+        ax5 = axes[4,i]
+        ax5.plot(R_phases[i]/1000, Ax_phases[i], color=primary_color, linestyle='-', label='Ax')
+        ax5.set_ylabel("Ax [m/s²]", color=primary_color)
+        ax5.tick_params(axis='y', labelcolor=primary_color)
+        ax5.grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+
+        ax5b = ax5.twinx()
+        ax5b.plot(R_phases[i]/1000, Ay_phases[i], color=secondary_color, linestyle='-', label='Ay')
+        ax5b.set_ylabel("Ay [m/s²]", color=secondary_color)
+        ax5b.tick_params(axis='y', labelcolor=secondary_color)
+
+        # 6. Tilt Acceleration
+        axes[5,i].plot(R_phases[i]/1000, (180/np.pi)*tilt_acc_phases[i], color='black', linestyle='-')
+        axes[5,i].set_ylabel("Tilt Acc [deg/s²]")
+        axes[5,i].set_xlabel("Range [km]")
+        axes[5,i].grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+
+    plt.tight_layout()
+    plt.show()
+
+def plot_energy_req(controls, mission):
+
+    # Grayscale palette
+    primary_color   = '#d9885f'  # dull/muted orange
+    secondary_color = '#7fa97f'  # dull/muted green
+    tertiary_color  = '#dcdcdc'  # light gray for grids
+
+    _, _, _, R_phases, *_, Tx_phases, Ty_phases, T_phases, P_phases, E, _, _, _, _ = controls
+    E_max = (1 - mission[6]) * mission[2] * 3600000
+    R = np.concatenate(R_phases)
+    Tx = np.concatenate(Tx_phases)
+    Ty = np.concatenate(Ty_phases)
+    T = np.concatenate(T_phases)
+    P = np.concatenate(P_phases)
+
+    fig, axes = plt.subplots(1, 2, figsize=(15,5))
+    fig.suptitle("Thrust, Power & Energy", fontsize=16, fontweight='bold')
+
+    # Total Thrust
+    axes[0].plot(R/1000, T/1000, color='black', linewidth=3, label='Total Thrust')
+    axes[0].plot(R/1000, Tx/1000, color=primary_color, linewidth=1, label='Horizonmtal Thrust')
+    axes[0].plot(R/1000, Ty/1000, color=secondary_color, linewidth=1, label='Vertical Thrust')
+
+    axes[0].set_xlabel("Range [km]")
+    axes[0].set_ylabel("Thrust [kN]")
+    axes[0].grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+    axes[0].legend(loc='best')
+
+    # Power (Left) and Energy (Right)
+    ax1 = axes[1]
+    ax2 = ax1.twinx()
+
+    # Power [kW]
+    ln1 = ax1.plot(R/1000, P/1000, color='tab:blue', linewidth=2, label="Power [kW]")
+    ax1.set_xlabel("Range [km]")
+    ax1.set_ylabel("Power [kW]", color='tab:blue')
+    ax1.tick_params(axis='y', labelcolor='tab:blue')
+    ax1.grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+
+    # Energy [kWh]
+    ln2 = ax2.plot(R/1000, E/3.6e6, color='tab:red', linewidth=2, linestyle='-', label="Energy [kWh]")
+    ln3 = ax2.plot(R/1000, (E_max/3.6e6)*np.ones_like(R), color='red', linewidth=1.5, linestyle=':', label="70 % Capacity")
+    ln4 = ax2.plot(R/1000, ((E_max/(1-mission[6]))/3.6e6)*np.ones_like(R), color='red', linewidth=1.5, linestyle='-.', label="Total Capacity")
+
+    ax2.set_ylabel("Energy [kWh]", color='tab:red')
+    ax2.tick_params(axis='y', labelcolor='tab:red')
+
+    # Combined legend
+    lns = ln1 + ln2 + ln3 + ln4
+    labs = [l.get_label() for l in lns]
+    ax1.legend(lns, labs, loc='best')
+
+    plt.tight_layout()
+    plt.show()
+
 
