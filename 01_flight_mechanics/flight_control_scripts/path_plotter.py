@@ -1,13 +1,13 @@
 # -----------------------------
 # Mission Parameters
 # -----------------------------
-gross_weight = 2404      # Gross Aircraft Weight (kg)
+gross_weight = 1600      # Gross Aircraft Weight (kg)
 energy_capacity = 150    # Battery energy (kWh)
-cruise_altitude = 3048   # Cruise altitude (m)
-reserve_energy_ratio = 0.4
-t_climb = 240
-t_cruise = 2700
-t_descent = 300
+cruise_altitude = 4500   # Cruise altitude (m)
+reserve_energy_ratio = 0.3
+t_climb = 180
+t_cruise = 1800
+t_descent = 360
 
 # -----------------------------
 # Aircraft Parameters
@@ -26,7 +26,12 @@ aircraft = [wing_planform_area, aircraft_frontal_area, rotor_diameter, wing_drag
 
 from tool_directory import get_controls, get_performance, plot_time_trajectory, plot_range_trajectory, plot_energy_req
 controls = get_controls(mission, aircraft)
-unit_range = get_performance(controls)
-plot_time_trajectory(controls) # Trajectory Plot
+unit_range, E_consumed, Range = get_performance(controls)
+
+print(f"\nTotal Range = {round(Range)} km")
+print(f"Total Energy Consumption = {round(E_consumed)} kWh")
+print(f"Range per unit Energy Consumption = {round(unit_range,3)} km/kWh")
+
+# plot_time_trajectory(controls)
 plot_range_trajectory(controls)
 plot_energy_req(controls, mission)

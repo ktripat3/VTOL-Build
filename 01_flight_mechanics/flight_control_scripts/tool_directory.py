@@ -51,7 +51,7 @@ def get_phase_trajectory(H_start, H_end, R_start, Vx_start, Vx_end, t_phase, t_o
     x_sol = sp.solve_linear_system(R_mat[0].row_join(sp.Matrix(R_mat[1])), *x_coeffs)
 
     R_poly = R_poly.subs(x_sol)
-    R_sym = sp.simplify(R_poly).subs(t, t - t_offset)
+    R_sym = R_poly.subs(t, t - t_offset)
 
     Vx_sym = sp.diff(R_sym, t)
     Ax_sym = sp.diff(Vx_sym, t)
@@ -88,7 +88,7 @@ def get_phase_trajectory(H_start, H_end, R_start, Vx_start, Vx_end, t_phase, t_o
     y_sol = sp.solve_linear_system(H_mat[0].row_join(sp.Matrix(H_mat[1])), *y_coeffs)
 
     H_poly = H_poly.subs(y_sol)
-    H_sym = sp.simplify(H_poly).subs(t, t - t_offset)
+    H_sym = H_poly.subs(t, t - t_offset)
 
     Vy_sym = sp.diff(H_sym, t)
     Ay_sym = sp.diff(Vy_sym, t)
@@ -110,27 +110,21 @@ def get_thrust(H_sym, Vx_sym, Vy_sym, Ax_sym, Ay_sym, rho_0, M, g, Cd, Cl, Ab_fr
     Tx_sym = sp.Piecewise((Tx_up, Vy_sym >= 0),(Tx_down, True))
     Ty_sym = sp.Piecewise((Ty_up, Vy_sym >= 0),(Ty_down, True))
 
-    return Tx_sym, Ty_sym
+    return Tx_sym, Ty_sym, rho_sym, V
 
-def get_power(Tx_sym, Ty_sym, H_sym, Vx_sym, Vy_sym, A_rotor, rotor_count, rho_0):
+def get_power(Tx_sym, Ty_sym, A_rotor, rotor_count, rho_sym, V):
 
     T_sym = sp.sqrt(Tx_sym**2 + Ty_sym**2)
     T_rotor = T_sym/rotor_count
     
-    rho_sym = rho_0*sp.exp(-H_sym/8500)
     vh = sp.sqrt(T_rotor / (2 * rho_sym * (A_rotor))) # Hover induced velocity
-
-    # vi = T_rotor / (2 * rho * (A_rotor) * sqrt(V**2 + vh**2))
-    V = sp.sqrt(Vx_sym**2 + Vy_sym**2)
     vi = sp.sqrt((sp.sqrt(V**4 + 4*vh**4) - V**2)/2)
 
-    # p_useful = (Tx_sym * Vx_sym + sp.Max(Ty_sym * Vy_sym, 0)) / rotor_count
     p_useful = T_rotor * V
 
     kappa = 1.15
     p_induced = (kappa * T_rotor * vi)
 
-    # Total Power
     P_sym = (p_useful + p_induced)*rotor_count
 
     return T_sym, P_sym
@@ -144,79 +138,58 @@ def get_tilt(Vx_sym, Vy_sym, Tx_sym, Ty_sym):
 
     return flight_path_sym, tilt_angle_sym, tilt_speed_sym, tilt_acc_sym
 
-def eval_sym(exprs, t, time):
-    result = []
-    for e in exprs:
-        f = sp.lambdify(t, e, "numpy")
-        val = f(time)   # return vector, not scalar
-        val = np.array(val, dtype=float)
-        if val.shape == ():  # if scalar returned
-            val = np.full_like(time, val, dtype=float)
-        result.append(val)
-    return result
+def compile_phase_funcs(H_sym, R_sym, Vx_sym, Vy_sym, Ax_sym, Ay_sym,
+                        Tx_sym, Ty_sym, T_sym, P_sym,
+                        flight_sym, tilt_sym, tilt_speed_sym, tilt_acc_sym, t):
+
+    funcs = {}
+    all_exprs = {
+        "H": H_sym, "R": R_sym, "Vx": Vx_sym, "Vy": Vy_sym,
+        "Ax": Ax_sym, "Ay": Ay_sym,
+        "Tx": Tx_sym, "Ty": Ty_sym, "T": T_sym, "P": P_sym,
+        "flight_angle": flight_sym, "tilt_angle": tilt_sym,
+        "tilt_speed": tilt_speed_sym, "tilt_acc": tilt_acc_sym
+    }
+    for k, expr in all_exprs.items():
+        funcs[k] = sp.lambdify(t, expr, "numpy")
+    return funcs
+
+def eval_phase_funcs(funcs, time_vec):
+    results = {k: np.array(f(time_vec), dtype=float) for k, f in funcs.items()}
+    # Handle scalars that might return shape=()
+    for k, val in results.items():
+        if val.shape == ():
+            results[k] = np.full_like(time_vec, val, dtype=float)
+    return results
 
 def solve_phase(H_start, H_end, R_start, Vx_start, Vx_end,
-                t_phase, t_offset, time_vec,
-                rho_0, M, g, Cd, Cl, Ab_frontal, Aw_planform,
-                A_rotor, rotor_count):
-
-    # -----------------------------
+                     t_phase, t_offset, time_vec,
+                     rho_0, M, g, Cd, Cl, Ab_frontal, Aw_planform,
+                     A_rotor, rotor_count):
+    
     # Trajectory
-    # -----------------------------
     H_sym, R_sym, Vx_sym, Vy_sym, Ax_sym, Ay_sym, t = get_phase_trajectory(
         H_start, H_end, R_start, Vx_start, Vx_end, t_phase, t_offset
     )
-
-    H, R, Vx, Vy, Ax, Ay = eval_sym(
-        [H_sym, R_sym, Vx_sym, Vy_sym, Ax_sym, Ay_sym],
-        t, time_vec
-    )
-
-    # -----------------------------
+    
     # Thrust
-    # -----------------------------
-    Tx_sym, Ty_sym = get_thrust(
-        H_sym, Vx_sym, Vy_sym, Ax_sym, Ay_sym,
-        rho_0, M, g, Cd, Cl, Ab_frontal, Aw_planform
-    )
-
-    Tx, Ty = eval_sym([Tx_sym, Ty_sym], t, time_vec)
-
-    # -----------------------------
+    Tx_sym, Ty_sym, rho_sym, V = get_thrust(H_sym, Vx_sym, Vy_sym, Ax_sym, Ay_sym,
+                                rho_0, M, g, Cd, Cl, Ab_frontal, Aw_planform)
+    
     # Power
-    # -----------------------------
-    T_sym, P_sym = get_power(Tx_sym, Ty_sym, H_sym, Vx_sym, Vy_sym, A_rotor, rotor_count, rho_0)
-
-    T, P = eval_sym([T_sym, P_sym], t, time_vec)
-
-    # -----------------------------
+    T_sym, P_sym = get_power(Tx_sym, Ty_sym, A_rotor, rotor_count, rho_sym, V)
+    
     # Tilt / Flight Path
-    # -----------------------------
-    flight_sym, tilt_sym, tilt_speed_sym, tilt_acc_sym = get_tilt(
-        Vx_sym, Vy_sym, Tx_sym, Ty_sym
-    )
-
-    flight, tilt, tilt_speed, tilt_acc = eval_sym(
-        [flight_sym, tilt_sym, tilt_speed_sym, tilt_acc_sym],
-        t, time_vec
-    )
-
-    return {
-        "H": H,
-        "R": R,
-        "Vx": Vx,
-        "Vy": Vy,
-        "Ax": Ax,
-        "Ay": Ay,
-        "Tx": Tx,
-        "Ty": Ty,
-        "T": T,
-        "P": P,
-        "flight_angle": flight,
-        "tilt_angle": tilt,
-        "tilt_speed": tilt_speed,
-        "tilt_acc": tilt_acc
-    }
+    flight_sym, tilt_sym, tilt_speed_sym, tilt_acc_sym = get_tilt(Vx_sym, Vy_sym, Tx_sym, Ty_sym)
+    
+    # Compile all once
+    funcs = compile_phase_funcs(H_sym, R_sym, Vx_sym, Vy_sym, Ax_sym, Ay_sym,
+                                Tx_sym, Ty_sym, T_sym, P_sym,
+                                flight_sym, tilt_sym, tilt_speed_sym, tilt_acc_sym, t)
+    
+    # Evaluate for the time vector
+    results = eval_phase_funcs(funcs, time_vec)
+    return results
 
 def get_controls(mission, aircraft):
 
@@ -283,11 +256,10 @@ def get_controls(mission, aircraft):
 def get_performance(controls):
     _, _, _, R_phases, *_, E, _, _, _, _ = controls
     # Performance
-    Range = R_phases[-1][-1]
-    Energy = E[-1]
-    unit_range = 3600 * Range / Energy
-    print(f"Range per unit Energy Consumption = {unit_range} km/kWh")
-    return unit_range
+    Range = R_phases[-1][-1]/1000
+    Energy = E[-1]/3.6E6
+    unit_range = Range / Energy
+    return unit_range, Energy, Range
 
 def plot_time_trajectory(controls):
 
@@ -488,5 +460,4 @@ def plot_energy_req(controls, mission):
 
     plt.tight_layout()
     plt.show()
-
 
