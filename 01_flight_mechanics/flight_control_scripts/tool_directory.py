@@ -253,13 +253,15 @@ def get_controls(mission, aircraft):
 
     return flight_phases, t_phases, H_phases, R_phases, Vx_phases, Vy_phases, Ax_phases, Ay_phases, Tx_phases, Ty_phases, T_phases, P_phases, E, flight_angle_phases, tilt_angle_phases, tilt_speed_phases, tilt_acc_phases
 
-def get_performance(controls):
-    _, _, _, R_phases, *_, E, _, _, _, _ = controls
-    # Performance
+def get_performance(rotor_count, controls):
+    _, _, _, R_phases, *_, T_phases, P_phases, E, _, _, _, _ = controls
+
+    T_rotor_max = np.nanmax(np.concatenate(T_phases))/(1000 * rotor_count)
+    P_rotor_max = np.nanmax(np.concatenate(P_phases))/(1000 * rotor_count)
     Range = R_phases[-1][-1]/1000
     Energy = E[-1]/3.6E6
     unit_range = Range / Energy
-    return unit_range, Energy, Range
+    return unit_range, Energy, Range, T_rotor_max, P_rotor_max
 
 def plot_time_trajectory(controls):
 
