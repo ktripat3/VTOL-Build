@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.integrate import cumulative_trapezoid
+from scipy.optimize import minimize
 import matplotlib.pyplot as plt
-
 
 def get_flight_params(mission, aircraft):
     # =============================
@@ -24,7 +24,6 @@ def get_flight_params(mission, aircraft):
     Cl = aircraft[5]
     rho_A = rho_0 * np.exp(-A/8500)
     Vc = np.sqrt(2*M*g/(Cl*rho_A*Aw_planform))
-    print(Vc)
     
     flight_params = [rho_0, g, M, A, Vc, Aw_planform, Ab_frontal, A_rotor, rotor_count, Cd, Cl]
 
@@ -132,13 +131,13 @@ def get_thrust(flight_params, trajectory):
     rho = rho_0 * np.exp(-H / 8500)
     
     temp = (0.5 * rho * (V**2))
-    Tx = (M * Ax) + temp*((Cd * Ab_frontal * np.cos(gamma)) + (Cl * Aw_planform * np.sin(gamma)))
-    Ty = M * (Ay + g) + temp*((Cd * Ab_frontal * np.sin(gamma)) - (Cl * Aw_planform * np.cos(gamma)))
-    # Tx_down = (M * Ax) + temp*((Cd * Ab_frontal * np.cos(gamma)) - (Cl * Aw_planform * np.sin(gamma)))
-    # Ty_down = M * (Ay + g) - temp*((Cd * Ab_frontal * np.sin(gamma)) + (Cl * Aw_planform * np.cos(gamma)))
+    Tx_up = (M * Ax) + temp*((Cd * Ab_frontal * np.cos(gamma)) + (Cl * Aw_planform * np.sin(gamma)))
+    Ty_up = M * (Ay + g) + temp*((Cd * Ab_frontal * np.sin(gamma)) - (Cl * Aw_planform * np.cos(gamma)))
+    Tx_down = (M * Ax) + temp*((Cd * Ab_frontal * np.cos(gamma)) - (Cl * Aw_planform * np.sin(gamma)))
+    Ty_down = M * (Ay + g) - temp*((Cd * Ab_frontal * np.sin(gamma)) + (Cl * Aw_planform * np.cos(gamma)))
 
-    # Tx = np.where(Vy >= 0, Tx_up, Tx_down)
-    # Ty = np.where(Vy >= 0, Ty_up, Ty_down)
+    Tx = np.where(Vy >= 0, Tx_up, Tx_down)
+    Ty = np.where(Vy >= 0, Ty_up, Ty_down)
     T = np.sqrt(Tx**2 + Ty**2)
     T_rotor = T/rotor_count
     thrust = [Tx, Ty, T, T_rotor]
@@ -194,8 +193,7 @@ def get_phases(flight_params, phase_times):
 # Directly Executable functions
 # =============================
 
-def solve_phase(mission, aircraft, profile_params):
-    flight_params = get_flight_params(mission, aircraft)
+def solve_phase(flight_params, profile_params):
     trajectory = get_phase_trajectory(profile_params)
     thrust = get_thrust(flight_params, trajectory)
     power = get_power(flight_params, trajectory, thrust)
@@ -206,17 +204,92 @@ def solve_phase(mission, aircraft, profile_params):
     Tx, Ty, T, T_rotor = thrust
     E, P, P_rotor = power
 
-    T_rotor_max = np.max(T_rotor)/1000
-    P_rotor_max = np.max(P_rotor)/1000
-    Range = R[-1]/1000
-    Energy = E[-1]/3.6E6
+    T_rotor_max = np.max(T_rotor)
+    P_rotor_max = np.max(P_rotor)
+    Range = R[-1]
+    Energy = E[-1]
     unit_range = Range / Energy
 
     performance = [T_rotor_max, P_rotor_max, Range, Energy, unit_range]
 
     return phase_results, performance
 
-def print_performance_metrics(performance):
+def phase_time_optimizer(x0, mission, flight_params):
+    gamma_limit = np.deg2rad(20)  # 20 degrees in radians
+
+    # Single evaluation for a candidate solution
+    def evaluate_candidate(phase_times):
+        phases, phase_params_dict = get_phases(flight_params, phase_times)
+        total_range = 0
+        total_energy = 0
+        max_gamma = 0
+
+        for profile_params in phase_params_dict.values():
+            phase_results, performance = solve_phase(flight_params, profile_params)
+            trajectory = phase_results[0]
+            gamma = trajectory[6]
+
+            total_range += performance[2]
+            total_energy += performance[3]
+            max_gamma = max(max_gamma, np.max(np.abs(gamma)))
+            print(np.degrees(max_gamma))
+
+        return total_range, total_energy, max_gamma
+
+    def smooth_max_gamma(gamma_array, alpha=50):
+        return (1/alpha) * np.log(np.sum(np.exp(alpha * np.abs(gamma_array))))
+
+    # Objective function (maximize range)
+    def objective(phase_times):
+        total_range, _, _ = evaluate_candidate(phase_times)
+        return -total_range
+
+    # Energy constraint: total_energy <= mission energy limit
+    def energy_constraint(phase_times):
+        _, total_energy, _ = evaluate_candidate(phase_times)
+        return 3.6e6 * (1 - mission[3]) * mission[2] - total_energy
+
+    # Flight path angle constraint: max_gamma <= gamma_limit
+    def gamma_constraint(phase_times):
+        _, _, gamma_array = evaluate_candidate(phase_times)
+        max_gamma_smooth = smooth_max_gamma(gamma_array)
+        return gamma_limit - max_gamma_smooth
+
+    # Bounds for climb, cruise, descent
+    bounds = [(100, 900),    # climb
+              (500, 5000),   # cruise
+              (100, 900)]    # descent
+
+    constraints = [
+        {'type': 'ineq', 'fun': energy_constraint},
+        {'type': 'ineq', 'fun': gamma_constraint}
+    ]
+
+    # Run optimizer
+    result = minimize(
+        objective,
+        x0,
+        method='SLSQP',
+        bounds=bounds,
+        constraints=constraints,
+        options={'maxiter': 500, 'ftol': 1e-6, 'disp': True}
+    )
+
+    # Round results
+    t_climb_opt, t_cruise_opt, t_descent_opt = np.round(result.x)
+    phase_times = [t_climb_opt, t_cruise_opt, t_descent_opt]
+
+    # Print results
+    print("Optimized phase times:", phase_times)
+    print("Range:", np.round(-result.fun / 1000), "kms")
+
+    # Extra check: print max gamma
+    _, _, max_gamma_final = evaluate_candidate(phase_times)
+    print("Max flight path angle (deg):", np.rad2deg(max_gamma_final))
+
+    return phase_times
+
+def print_performance_metrics(performance, phase_name):
     class bcolors:
         HEADER = '\033[95m'
         OKBLUE = '\033[94m'
@@ -228,12 +301,12 @@ def print_performance_metrics(performance):
         UNDERLINE = '\033[4m'
         END = '\033[0m'
 
-    print(bcolors.BOLD + bcolors.HEADER + "\n------------------------ Flight Metrics ------------------------" + bcolors.END)
-    print(f"{bcolors.OKGREEN}Total Range: {bcolors.END}{round(performance[2]):,} km")
-    print(f"{bcolors.OKBLUE}Peak Thrust per Rotor: {bcolors.END}{round(performance[0]):,} kN")
-    print(f"{bcolors.OKCYAN}Peak Power per Rotor: {bcolors.END}{round(performance[1]):,} kW")
-    print(f"{bcolors.WARNING}Total Energy Consumption: {bcolors.END}{round(performance[3]):,} kWh")
-    print(f"{bcolors.BOLD}Range per Unit Energy Consumption: {bcolors.END}{round(performance[4],3):,} km/kWh")
+    print(bcolors.BOLD + bcolors.HEADER + f"\n-------------------- Flight Metrics - {phase_name} -------------------" + bcolors.END)
+    print(f"{bcolors.OKGREEN}Total Range: {bcolors.END}{round(performance[2]/1000, 3):,} km")
+    print(f"{bcolors.OKBLUE}Peak Thrust per Rotor: {bcolors.END}{round(performance[0]/1000, 3):,} kN")
+    print(f"{bcolors.OKCYAN}Peak Power per Rotor: {bcolors.END}{round(performance[1]/1000, 3):,} kW")
+    print(f"{bcolors.WARNING}Total Energy Consumption: {bcolors.END}{round(performance[3]/3.6e6, 3):,} kWh")
+    print(f"{bcolors.BOLD}Range per Unit Energy Consumption: {bcolors.END}{round(3.6e3*performance[4],3):,} km/kWh")
     print(bcolors.BOLD + bcolors.HEADER + "---------------------------------------------------------------\n" + bcolors.END)
     
     return
@@ -242,8 +315,6 @@ def plot_time_trajectory(phase_results, phase_name):
     trajectory, *_, rotor_tilt = phase_results
     H, R, Vx, Vy, Ax, Ay, gamma, t = trajectory
     tilt_angle, tilt_speed, tilt_acc = rotor_tilt
-
-    fig, axes = plt.subplots(6, 3, figsize=(15,12))
 
     # Grayscale palette
     primary_color   = '#d9885f'  # dull/muted orange
@@ -397,7 +468,7 @@ def plot_energy_req(mission, phase_results):
 
     # Total Thrust
     axes[0].plot(R/1000, T/1000, color='black', linewidth=3, label='Total Thrust')
-    axes[0].plot(R/1000, Tx/1000, color=primary_color, linewidth=1, label='Horizonmtal Thrust')
+    axes[0].plot(R/1000, Tx/1000, color=primary_color, linewidth=1, label='Horizontal Thrust')
     axes[0].plot(R/1000, Ty/1000, color=secondary_color, linewidth=1, label='Vertical Thrust')
 
     axes[0].set_xlabel("Range [km]")
@@ -431,4 +502,108 @@ def plot_energy_req(mission, phase_results):
 
     plt.tight_layout()
     plt.show()
+
+def plot_trajectory(phase_results):
+    phases = list(phase_results.keys())
+    fig, axes = plt.subplots(6, 3, figsize=(18, 14))  # 6 rows, 3 columns
+    tertiary_color = '#dcdcdc'
+    primary_color   = '#d9885f'
+    secondary_color = '#7fa97f'
+
+    for col, phase in enumerate(phases):
+        traj, _, _, rotor_tilt = phase_results[phase]
+        H, R, Vx, Vy, Ax, Ay, gamma, t = traj
+        tilt_angle, tilt_speed, tilt_acc = rotor_tilt
+
+        # --- Row 0: Ground Range & Altitude ---
+        ax0 = axes[0, col]
+        ax0.plot(R/1000, H, color=primary_color, label="Altitude")
+        ax0.set_ylabel("Altitude [m]", color=primary_color)
+        ax0.set_title(phase, fontweight='bold')
+        ax0.grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+
+        # --- Row 1: Flight Path & Tilt ---
+        ax1 = axes[1, col]
+        ax1.plot(R/1000, np.degrees(gamma), color=primary_color, label="Flight Path Angle")
+        ax1b = ax1.twinx()
+        ax1b.plot(R/1000, np.degrees(tilt_angle), color=secondary_color, label="Tilt Angle")
+        ax1.set_ylabel("γ [deg]", color=primary_color)
+        ax1b.set_ylabel("Tilt [deg]", color=secondary_color)
+        ax1.grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+
+        # --- Row 2: Velocities ---
+        ax2 = axes[2, col]
+        ax2.plot(R/1000, Vx, color=primary_color, label="Vx")
+        ax2b = ax2.twinx()
+        ax2b.plot(R/1000, Vy, color=secondary_color, label="Vy")
+        ax2.set_ylabel("Vx [m/s]", color=primary_color)
+        ax2b.set_ylabel("Vy [m/s]", color=secondary_color)
+        ax2.grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+
+        # --- Row 3: Tilt Speed ---
+        ax3 = axes[3, col]
+        ax3.plot(R/1000, np.degrees(tilt_speed), color='black', label="Tilt Speed")
+        ax3.set_ylabel("Tilt Speed [deg/s]", color='black')
+        ax3.grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+
+        # --- Row 4: Accelerations ---
+        ax4 = axes[4, col]
+        ax4.plot(R/1000, Ax, color=primary_color, label="Ax")
+        ax4b = ax4.twinx()
+        ax4b.plot(R/1000, Ay, color=secondary_color, label="Ay")
+        ax4.set_ylabel("Ax [m/s²]", color=primary_color)
+        ax4b.set_ylabel("Ay [m/s²]", color=secondary_color)
+        ax4.grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+
+        # --- Row 5: Tilt Acceleration ---
+        ax5 = axes[5, col]
+        ax5.plot(R/1000, np.degrees(tilt_acc), color='black', label="Tilt Acc")
+        ax5.set_ylabel("Tilt Acc [deg/s²]", color='black')
+        ax5.set_xlabel("Range [km]")  # Only bottom row gets x-axis label
+        ax5.grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+
+    plt.tight_layout()
+    plt.show()
+
+def plot_energy(phase_results, mission):
+    phases = list(phase_results.keys())
+    fig, axes = plt.subplots(2, 3, figsize=(18, 8))
+    tertiary_color = '#dcdcdc'
+    primary_color   = '#d9885f'
+    secondary_color = '#7fa97f'
+
+    for col, phase in enumerate(phases):
+        _, thrust, power, _ = phase_results[phase]
+        H, R, Vx, Vy, Ax, Ay, gamma, t = phase_results[phase][0]
+        Tx, Ty, T, T_rotor = thrust
+        E, P, P_rotor = power
+
+        # --- Row 0: Thrust ---
+        ax0 = axes[0, col]
+        ax0.plot(R/1000, T/1000, 'k', label='Total Thrust')
+        ax0.plot(R/1000, Tx/1000, color=primary_color, label='Horizontal')
+        ax0.plot(R/1000, Ty/1000, color=secondary_color, label='Vertical')
+        ax0.set_title(phase)
+        if col == 0:
+            ax0.set_ylabel("Thrust [kN]", color='black')
+        ax0.legend(loc='best')
+        ax0.grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+
+        # --- Row 1: Power & Energy ---
+        ax1 = axes[1, col]
+        ax2b = ax1.twinx()
+        ax1.plot(R/1000, P/1000, color='tab:blue', label="Power [kW]")
+        ax2b.plot(R/1000, E/3.6e6, color='tab:red', label="Energy [kWh]")
+        ax2b.plot(R/1000, (mission[2])*np.ones_like(R), 'r:', label="70% Capacity")
+        ax2b.plot(R/1000, (mission[2]*(1-mission[3]))*np.ones_like(R), 'r-.', label="Total Capacity")
+        if col == 0:
+            ax1.set_ylabel("Power [kW]", color='tab:blue')
+            ax2b.set_ylabel("Energy [kWh]", color='tab:red')
+        ax1.legend(loc='best')
+        ax1.set_xlabel("Range [km]")
+        ax1.grid(True, color=tertiary_color, linestyle='--', linewidth=0.5)
+
+    plt.tight_layout()
+    plt.show()
+
 

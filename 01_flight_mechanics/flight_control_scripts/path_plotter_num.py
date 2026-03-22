@@ -32,10 +32,9 @@ phases, phase_params_dict = get_phases(flight_params, phase_times)
 
 phase_results = {}
 phase_performance = {}
-for phase in phases:
-    profile_params = phase_params_dict[phase]
+
+for phase, profile_params in phase_params_dict.items():
     traj, performance = solve_phase(mission, aircraft, profile_params)
-    
     phase_results[phase] = traj
     phase_performance[phase] = performance
     print_performance_metrics(performance)
